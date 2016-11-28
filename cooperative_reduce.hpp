@@ -127,10 +127,32 @@ agency::experimental::range_value_t<Range>
   // the entire group cooperatively reduces the partial sums
   int num_partials = rng.size() < group_size ? rng.size() : group_size;
   
-  using T = agency::experimental::range_value_t<Range>;
-  using reduce_t = collective_reducer<T,group_size>;
-
   return reducer.reduce(self, partial_sum, num_partials, binary_op);
+}
+
+
+template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, class Range, class T, class BinaryOperator>
+__host__ __device__
+T cooperative_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
+                     collective_reducer<agency::experimental::range_value_t<Range>, (int)group_size>& reducer,
+                     Range&& rng,
+                     T init,
+                     BinaryOperator binary_op)
+{
+  using namespace agency::experimental;
+
+  auto agent_rank = self.rank();
+
+  // each agent strides through its group's chunk of the input...
+  auto my_values = stride(drop(rng, agent_rank), size_t(group_size));
+  
+  // ...and sequentially computes a partial sum
+  auto partial_sum = uninitialized_reduce(unroll<grain_size>(), my_values, binary_op);
+  
+  // the entire group cooperatively reduces the partial sums
+  int num_partials = rng.size() < group_size ? rng.size() : group_size;
+
+  return reducer.reduce(self, partial_sum, num_partials, init, binary_op);
 }
 
 

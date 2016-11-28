@@ -65,11 +65,7 @@ agency::cuda::async_future<T> async_reduce(Range&& input, T init, BinaryOperatio
     [=] __host__ __device__ (static_grid_agent<512,4>& self, tile_sums_t& tile_sums, phase_two_reducer_t& reducer)
     {
       // sum across the tile
-      // XXX init should be incorporated as a parameter to this call
-      auto tile_sum = cooperative_uninitialized_reduce(self.inner(), reducer, tile_sums, binary_op);
-
-      // add in the initial value
-      tile_sum = binary_op(init,tile_sum);
+      auto tile_sum = cooperative_reduce(self.inner(), reducer, tile_sums, init, binary_op);
 
       // rank 0 returns the result
       return self.inner().rank() == 0 ? single_result<T>(tile_sum) : no_result<T>();

@@ -172,7 +172,7 @@ struct warp_reducer
 {
   static_assert(num_threads <= 32 && is_pow2(num_threads), "warp_reducer must operate on a pow2 number of threads <= CUDA warp size (32)");
 
-  template<typename BinaryOperation>
+  template<class BinaryOperation>
   __device__
   static agency::experimental::optional<T> reduce_and_elect(int lane, agency::experimental::optional<T> x, int count, BinaryOperation binary_op)
   {
@@ -197,6 +197,7 @@ struct warp_reducer
 
     return (lane == 0) ? x : agency::experimental::nullopt;
   }
+
 };
 
 
@@ -235,25 +236,65 @@ class collective_reducer
 
     //collective_reducer(collective_reducer&&) = delete;
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300
-    template<class ConcurrentAgent, class BinaryOperation>
+  private:
+    // initialize_storage() without init value
+    template<class ConcurrentAgent>
     __device__
-    agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
+    void initialize_storage(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count)
     {
-      using warp_barrier = warp_reducer<T, num_participating_agents>;
-
       auto agent_rank = self.rank();
-      auto partial_sum = value;
 
       // store partial sum to storage
       if(agent_rank < count)
       {
-        storage_[agent_rank] = *partial_sum;
+        storage_[agent_rank] = *value;
       }
 
-      using namespace agency::experimental;
-      auto partial_sums = span<T>(storage_.data(), count);
       self.wait();
+    }
+
+    // initialize_storage() with init value
+    template<class ConcurrentAgent, class BinaryOperation>
+    __device__
+    void initialize_storage(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
+    {
+      auto agent_rank = self.rank();
+
+      if(agent_rank == 0)
+      {
+        // agent 0 sums in the init
+        if(count == 0)
+        {
+          storage_[agent_rank] = init;
+        }
+        else
+        {
+          storage_[agent_rank] = binary_op(init, *value);
+        }
+      }
+      else if(agent_rank < count)
+      {
+        storage_[agent_rank] = *value;
+      }
+
+      self.wait();
+    }
+
+
+    // do_reduce_and_elect() implements the reduction logic
+    // it assumes that initialize_storage() has been called to intialize the storage_ array with the values to reduce
+    template<class ConcurrentAgent, class BinaryOperation>
+    __device__
+    agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, int count, BinaryOperation binary_op)
+    {
+      using namespace agency::experimental;
+
+      agency::experimental::optional<T> partial_sum;
+      auto partial_sums = span<T>(storage_.data(), count);
+      auto agent_rank = self.rank();
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300
+      using warp_barrier = warp_reducer<T, num_participating_agents>;
 
       if(agent_rank < num_participating_agents)
       {
@@ -266,29 +307,7 @@ class collective_reducer
         partial_sum = warp_barrier::reduce_and_elect(agent_rank, partial_sum, minimum(count, (int)num_participating_agents), binary_op);
       }
       self.wait();
-
-      return agent_rank == 0 ? partial_sum : agency::experimental::nullopt;
-    }
-
 #else
-
-    template<class ConcurrentAgent, class BinaryOperation>
-    __device__
-    agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
-    {
-      auto agent_rank = self.rank();
-      auto partial_sum = value;
-
-      // store partial sum to storage
-      if(agent_rank < count)
-      {
-        storage_[agent_rank] = *partial_sum;
-      }
-
-      using namespace agency::experimental;
-      auto partial_sums = span<T>(storage_.data(), count);
-      self.wait();
-
       if(agent_rank < num_participating_agents)
       {
         // stride through the input and compute a partial sum per agent
@@ -327,12 +346,53 @@ class collective_reducer
         }
         self.wait();
       }
+#endif
 
       return agent_rank == 0 ? partial_sum : agency::experimental::nullopt;
     }
 
-#endif
 
+  public:
+    // reduce_and_elect() with init
+    template<class ConcurrentAgent, class BinaryOperation>
+    __device__
+    agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
+    {
+      initialize_storage(self, value, count, init, binary_op);
+      return do_reduce_and_elect(self, count, binary_op);
+    }
+
+
+    // reduce_and_elect() without init
+    template<class ConcurrentAgent, class BinaryOperation>
+    __device__
+    agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
+    {
+      initialize_storage(self, value, count);
+      return do_reduce_and_elect(self, count, binary_op);
+    }
+
+
+    // reduce() with init
+    template<class ConcurrentAgent, class BinaryOperation>
+    __device__
+    T reduce(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
+    {
+      auto result = reduce_and_elect(self, value, count, init, binary_op);
+
+      // XXX we're using inside knowledge that reduce_and_elect() always elects agent_rank == 0
+      if(self.rank() == 0)
+      {
+        storage_[0] = *result;
+      }
+
+      self.wait();
+
+      return storage_[0];
+    }
+
+
+    // reduce() without init
     template<class ConcurrentAgent, class BinaryOperation>
     __device__
     T reduce(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
