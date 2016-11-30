@@ -1,4 +1,7 @@
 #include <iostream>
+#include <algorithm>
+#include <numeric>
+
 #include <agency/cuda.hpp>
 
 #include "async_reduce.hpp"
