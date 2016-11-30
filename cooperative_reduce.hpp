@@ -72,11 +72,11 @@ template<class ExecutionPolicy, class Range, class T, class BinaryOperator>
 __host__ __device__
 T reduce(ExecutionPolicy policy, Range&& rng, T init, BinaryOperator binary_op)
 {
-  using value_type = typename agency::experimental::range_value_t<Range>;
+  using reference = typename agency::experimental::range_value_t<Range>;
 
-  for_each(policy, std::forward<Range>(rng), [&](value_type& value)
+  for_each(policy, std::forward<Range>(rng), [&](reference x)
   {
-    init = binary_op(init, value);
+    init = binary_op(init, x);
   });
 
   return init;
