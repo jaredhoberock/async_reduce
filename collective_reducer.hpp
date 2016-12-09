@@ -209,6 +209,7 @@ agency::experimental::optional<agency::experimental::range_value_t<Range>>
   uninitialized_reduce(ExecutionPolicy policy, Range&& rng, BinaryOperator binary_op);
 
 
+// XXX we should allow num_agents to default to a value indicating a dynamic number of agents
 template<class T, int num_agents>
 class collective_reducer
 {
