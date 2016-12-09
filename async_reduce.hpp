@@ -41,38 +41,32 @@ agency::cuda::async_future<T> async_reduce(Range&& input, T init, BinaryOperatio
   // make a view of the input that we can capture by value
   auto input_view = all(std::forward<Range>(input));
 
-  using phase_one_reducer_t = collective_reducer<T,group_size>;
-
   auto tile_sums_future = bulk_async(static_grid<128,8>(num_groups),
-    [=] __host__ __device__ (static_grid_agent<128,8>& self, phase_one_reducer_t& reducer)
+    [=] __host__ __device__ (static_grid_agent<128,8>& self)
     {
       // find this group's tile of the input
       auto this_tile = tile(input_view, tile_size)[self.outer().rank()];
 
       // sum across the tile
-      auto tile_sum = cooperative_uninitialized_reduce(self.inner(), reducer, this_tile, binary_op);
+      auto tile_sum = cooperative_uninitialized_reduce(self.inner(), this_tile, binary_op);
 
       // rank 0 returns the result
       return self.inner().rank() == 0 ? scope_result<1,T>(tile_sum) : no_result<T>();
-    },
-    share_at_scope<1,phase_one_reducer_t>()
+    }
   );
 
   using tile_sums_t = typename future_traits<decltype(tile_sums_future)>::value_type;
 
-  using phase_two_reducer_t = collective_reducer<T,512>;
-
   return bulk_then(static_grid<512,4>(1),
-    [=] __host__ __device__ (static_grid_agent<512,4>& self, tile_sums_t& tile_sums, phase_two_reducer_t& reducer)
+    [=] __host__ __device__ (static_grid_agent<512,4>& self, tile_sums_t& tile_sums)
     {
       // sum across the tile
-      auto tile_sum = cooperative_reduce(self.inner(), reducer, tile_sums, init, binary_op);
+      auto tile_sum = cooperative_reduce(self.inner(), tile_sums, init, binary_op);
 
       // rank 0 returns the result
       return self.inner().rank() == 0 ? single_result<T>(tile_sum) : no_result<T>();
     },
-    tile_sums_future,
-    share_at_scope<1,phase_two_reducer_t>()
+    tile_sums_future
   );
 }
 
