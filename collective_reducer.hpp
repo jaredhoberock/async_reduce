@@ -281,7 +281,7 @@ class basic_collective_reducer
       static constexpr const int num_participating_agents = minimum(32, group_size);
       static constexpr const int num_sequential_sums_per_agent = group_size / num_participating_agents;
 
-      agency::experimental::optional<T> partial_sum;
+      optional<T> partial_sum;
       auto partial_sums = span<T>(storage.data(), count);
       auto agent_rank = self.rank();
 
@@ -367,7 +367,7 @@ class basic_collective_reducer<T,dynamic_group_size>
       const int num_participating_agents = minimum(32, (int)self.group_size());
       const int num_sequential_sums_per_agent = self.group_size() / num_participating_agents;
 
-      agency::experimental::optional<T> partial_sum;
+      optional<T> partial_sum;
       auto partial_sums = span<T>(storage.data(), count);
       auto agent_rank = self.rank();
 
