@@ -239,25 +239,25 @@ class collective_reducer
 
   private:
     // initialize_storage() without init value
-    template<class ConcurrentAgent>
+    template<class ConcurrentAgent, class ContiguousRange>
     __device__
-    void initialize_storage(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count)
+    static void initialize_storage(ConcurrentAgent& self, ContiguousRange&& storage, const agency::experimental::optional<T>& value, int count)
     {
       auto agent_rank = self.rank();
 
       // store partial sum to storage
       if(agent_rank < count)
       {
-        storage_[agent_rank] = *value;
+        storage[agent_rank] = *value;
       }
 
       self.wait();
     }
 
     // initialize_storage() with init value
-    template<class ConcurrentAgent, class BinaryOperation>
+    template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation>
     __device__
-    void initialize_storage(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
+    static void initialize_storage(ConcurrentAgent& self, ContiguousRange&& storage, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
     {
       auto agent_rank = self.rank();
 
@@ -266,16 +266,16 @@ class collective_reducer
         // agent 0 sums in the init
         if(count == 0)
         {
-          storage_[agent_rank] = init;
+          storage[agent_rank] = init;
         }
         else
         {
-          storage_[agent_rank] = binary_op(init, *value);
+          storage[agent_rank] = binary_op(init, *value);
         }
       }
       else if(agent_rank < count)
       {
-        storage_[agent_rank] = *value;
+        storage[agent_rank] = *value;
       }
 
       self.wait();
@@ -283,15 +283,15 @@ class collective_reducer
 
 
     // do_reduce_and_elect() implements the reduction logic
-    // it assumes that initialize_storage() has been called to intialize the storage_ array with the values to reduce
-    template<class ConcurrentAgent, class BinaryOperation>
+    // it assumes that initialize_storage() has been called to intialize the storage range with the values to reduce
+    template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation>
     __device__
-    agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, int count, BinaryOperation binary_op)
+    static agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, ContiguousRange&& storage, int count, BinaryOperation binary_op)
     {
       using namespace agency::experimental;
 
       agency::experimental::optional<T> partial_sum;
-      auto partial_sums = span<T>(storage_.data(), count);
+      auto partial_sums = span<T>(storage.data(), count);
       auto agent_rank = self.rank();
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300
@@ -318,7 +318,7 @@ class collective_reducer
 
         if(partial_sum)
         {
-          storage_[agent_rank] = *partial_sum;
+          storage[agent_rank] = *partial_sum;
         }
       }
       self.wait();
@@ -327,7 +327,7 @@ class collective_reducer
       int first = (1 & num_passes) ? num_participating_agents : 0;
       if(agent_rank < num_participating_agents && partial_sum)
       {
-        storage_[first + agent_rank] = *partial_sum;
+        storage[first + agent_rank] = *partial_sum;
       }
       self.wait();
 
@@ -339,11 +339,11 @@ class collective_reducer
         {
           if(agent_rank + offset < count2) 
           {
-            partial_sum = binary_op(*partial_sum, storage_[first + offset + agent_rank]);
+            partial_sum = binary_op(*partial_sum, storage[first + offset + agent_rank]);
           }
 
           first = num_participating_agents - first;
-          storage_[first + agent_rank] = *partial_sum;
+          storage[first + agent_rank] = *partial_sum;
         }
         self.wait();
       }
@@ -359,8 +359,8 @@ class collective_reducer
     __device__
     agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
     {
-      initialize_storage(self, value, count, init, binary_op);
-      return do_reduce_and_elect(self, count, binary_op);
+      initialize_storage(self, storage_, value, count, init, binary_op);
+      return do_reduce_and_elect(self, storage_, count, binary_op);
     }
 
 
@@ -369,8 +369,8 @@ class collective_reducer
     __device__
     agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
     {
-      initialize_storage(self, value, count);
-      return do_reduce_and_elect(self, count, binary_op);
+      initialize_storage(self, storage_, value, count);
+      return do_reduce_and_elect(self, storage_, count, binary_op);
     }
 
 
