@@ -224,9 +224,6 @@ struct execution_agent_static_group_size_impl<agency::experimental::static_concu
 };
 
 
-} // end detail
-
-
 template<class ExecutionAgent>
 using execution_agent_static_group_size = typename detail::execution_agent_static_group_size_impl<ExecutionAgent>::type;
 
@@ -234,15 +231,22 @@ template<class ExecutionAgent>
 using execution_agent_has_static_group_size = agency::detail::is_detected<execution_agent_static_group_size, ExecutionAgent>;
 
 
-// XXX we should allow num_agents to default to a value indicating a dynamic number of agents
-template<class T, int num_agents>
-class collective_reducer
+constexpr int dynamic_group_size = -1;
+
+
+template<class T, int group_size>
+class basic_collective_reducer
 {
-  public:
-    static_assert(0 == num_agents % 32, "num_agents must be a multiple of warp_size (32)");
-   
+  private:
+    using storage_type = agency::experimental::array<T, maximum(group_size, 2 * minimum(group_size, 32))>;
+    storage_type storage_;
+
+  protected:
+    static_assert(0 == group_size % 32, "group_size must be a multiple of warp_size (32)");
+
+
     __device__
-    collective_reducer()
+    basic_collective_reducer()
     {
       // XXX note that we're explicitly opting out of default constructing the storage_ array
       //     we do this because constructing the storage_ array yields a big slowdown
@@ -258,138 +262,24 @@ class collective_reducer
       //     if we went in this direction, we'd need to destroy storage_[agent_rank] right before we exit the function
     }
 
-    //collective_reducer(const collective_reducer&) = delete;
 
-    //collective_reducer(collective_reducer&&) = delete;
-
-  private:
-    // initialize_storage() without init value
-    template<class ConcurrentAgent, class ContiguousRange>
     __device__
-    static void initialize_storage(ConcurrentAgent& self, ContiguousRange& storage, const agency::experimental::optional<T>& value, int count)
+    storage_type& storage()
     {
-      auto agent_rank = self.rank();
-
-      // store partial sum to storage
-      if(agent_rank < count)
-      {
-        storage[agent_rank] = *value;
-      }
-
-      self.wait();
+      return storage_;
     }
 
-    // initialize_storage() with init value
+   
+    // do_reduce_and_elect() implements the reduction logic
+    // it assumes that initialize_storage() has been called to intialize the storage range with the values to reduce
     template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation>
     __device__
-    static void initialize_storage(ConcurrentAgent& self, ContiguousRange& storage, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
-    {
-      auto agent_rank = self.rank();
-
-      if(agent_rank == 0)
-      {
-        // agent 0 sums in the init
-        if(count == 0)
-        {
-          storage[agent_rank] = init;
-        }
-        else
-        {
-          storage[agent_rank] = binary_op(init, *value);
-        }
-      }
-      else if(agent_rank < count)
-      {
-        storage[agent_rank] = *value;
-      }
-
-      self.wait();
-    }
-
-
-    // do_reduce_and_elect() implements the reduction logic
-    // it assumes that initialize_storage() has been called to intialize the storage range with the values to reduce
-    template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation,
-             __AGENCY_REQUIRES(
-               !execution_agent_has_static_group_size<ConcurrentAgent>::value
-             )>
-    __device__
     static agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, ContiguousRange& storage, int count, BinaryOperation binary_op)
     {
       using namespace agency::experimental;
 
-      // XXX this should be generalized somehow -- it's just the smaller of 32 and self.group_size()
-      //     in other words, at most the first warp of agents participates
-      // XXX alternatively, maybe this implementation should only be available to groups of static size
-      const int num_participating_agents = minimum(32, (int)self.group_size());
-      const int num_sequential_sums_per_agent = self.group_size() / num_participating_agents;
-
-      agency::experimental::optional<T> partial_sum;
-      auto partial_sums = span<T>(storage.data(), count);
-      auto agent_rank = self.rank();
-
-      if(agent_rank < num_participating_agents)
-      {
-        // stride through the input and compute a partial sum per agent
-        auto my_partial_sums = stride(drop(partial_sums, agent_rank), num_participating_agents);
-
-        partial_sum = uninitialized_reduce(agency::seq, my_partial_sums, binary_op);
-
-        if(partial_sum)
-        {
-          storage[agent_rank] = *partial_sum;
-        }
-      }
-      self.wait();
-
-      int num_partial_sums = minimum(count, num_participating_agents);
-
-      const int num_passes = log2(num_participating_agents);
-      int first = (1 & num_passes) ? num_participating_agents : 0;
-
-      if(agent_rank < num_participating_agents && partial_sum)
-      {
-        storage[first + agent_rank] = *partial_sum;
-      }
-      self.wait();
-
-
-      int offset = 1;
-      for(int pass = 0; pass < num_passes; ++pass, offset *= 2)
-      {
-        if(agent_rank < num_participating_agents)
-        {
-          if(agent_rank + offset < num_partial_sums) 
-          {
-            partial_sum = binary_op(*partial_sum, storage[first + offset + agent_rank]);
-          }
-
-          first = num_participating_agents - first;
-          storage[first + agent_rank] = *partial_sum;
-        }
-        self.wait();
-      }
-
-      return agent_rank == 0 ? partial_sum : agency::experimental::nullopt;
-    }
-
-
-    // do_reduce_and_elect() implements the reduction logic
-    // it assumes that initialize_storage() has been called to intialize the storage range with the values to reduce
-    template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation,
-             __AGENCY_REQUIRES(
-               execution_agent_has_static_group_size<ConcurrentAgent>::value
-             )>
-    __device__
-    static agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, ContiguousRange& storage, int count, BinaryOperation binary_op)
-    {
-      using namespace agency::experimental;
-
-      // XXX this should be generalized somehow -- it's just the smaller of 32 and self.group_size()
-      //     in other words, at most the first warp of agents participates
-      // XXX alternatively, maybe this implementation should only be available to groups of static size
-      static constexpr const int num_participating_agents = minimum(32, num_agents);
-      static constexpr const int num_sequential_sums_per_agent = num_agents / num_participating_agents;
+      static constexpr const int num_participating_agents = minimum(32, group_size);
+      static constexpr const int num_sequential_sums_per_agent = group_size / num_participating_agents;
 
       agency::experimental::optional<T> partial_sum;
       auto partial_sums = span<T>(storage.data(), count);
@@ -455,7 +345,91 @@ class collective_reducer
 
       return agent_rank == 0 ? partial_sum : agency::experimental::nullopt;
     }
+};
 
+
+
+template<class T>
+class basic_collective_reducer<T,dynamic_group_size>
+{
+  protected:
+    // do_reduce_and_elect() implements the reduction logic
+    // it assumes that initialize_storage() has been called to intialize the storage range with the values to reduce
+    template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation,
+             __AGENCY_REQUIRES(
+               !execution_agent_has_static_group_size<ConcurrentAgent>::value
+             )>
+    __device__
+    static agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, ContiguousRange& storage, int count, BinaryOperation binary_op)
+    {
+      using namespace agency::experimental;
+
+      // XXX this should be generalized somehow -- it's just the smaller of 32 and self.group_size()
+      //     in other words, at most the first warp of agents participates
+      // XXX alternatively, maybe this implementation should only be available to groups of static size
+      const int num_participating_agents = minimum(32, (int)self.group_size());
+      const int num_sequential_sums_per_agent = self.group_size() / num_participating_agents;
+
+      agency::experimental::optional<T> partial_sum;
+      auto partial_sums = span<T>(storage.data(), count);
+      auto agent_rank = self.rank();
+
+      if(agent_rank < num_participating_agents)
+      {
+        // stride through the input and compute a partial sum per agent
+        auto my_partial_sums = stride(drop(partial_sums, agent_rank), num_participating_agents);
+
+        partial_sum = uninitialized_reduce(agency::seq, my_partial_sums, binary_op);
+
+        if(partial_sum)
+        {
+          storage[agent_rank] = *partial_sum;
+        }
+      }
+      self.wait();
+
+      int num_partial_sums = minimum(count, num_participating_agents);
+
+      const int num_passes = log2(num_participating_agents);
+      int first = (1 & num_passes) ? num_participating_agents : 0;
+
+      if(agent_rank < num_participating_agents && partial_sum)
+      {
+        storage[first + agent_rank] = *partial_sum;
+      }
+      self.wait();
+
+
+      int offset = 1;
+      for(int pass = 0; pass < num_passes; ++pass, offset *= 2)
+      {
+        if(agent_rank < num_participating_agents)
+        {
+          if(agent_rank + offset < num_partial_sums) 
+          {
+            partial_sum = binary_op(*partial_sum, storage[first + offset + agent_rank]);
+          }
+
+          first = num_participating_agents - first;
+          storage[first + agent_rank] = *partial_sum;
+        }
+        self.wait();
+      }
+
+      return agent_rank == 0 ? partial_sum : agency::experimental::nullopt;
+    }
+};
+
+
+} // end detail
+
+
+// XXX we should allow num_agents to default to a value indicating a dynamic group size
+template<class T, int group_size>
+class collective_reducer : public detail::basic_collective_reducer<T,group_size>
+{
+  private:
+    using super_t = detail::basic_collective_reducer<T,group_size>;
 
   public:
     // reduce_and_elect() with init
@@ -463,8 +437,8 @@ class collective_reducer
     __device__
     agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
     {
-      initialize_storage(self, storage_, value, count, init, binary_op);
-      return do_reduce_and_elect(self, storage_, count, binary_op);
+      initialize_storage(self, super_t::storage(), value, count, init, binary_op);
+      return do_reduce_and_elect(self, super_t::storage(), count, binary_op);
     }
 
 
@@ -473,8 +447,8 @@ class collective_reducer
     __device__
     agency::experimental::optional<T> reduce_and_elect(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
     {
-      initialize_storage(self, storage_, value, count);
-      return do_reduce_and_elect(self, storage_, count, binary_op);
+      initialize_storage(self, super_t::storage(), value, count);
+      return do_reduce_and_elect(self, super_t::storage(), count, binary_op);
     }
 
 
@@ -488,12 +462,12 @@ class collective_reducer
       // XXX we're using inside knowledge that reduce_and_elect() always elects agent_rank == 0
       if(self.rank() == 0)
       {
-        storage_[0] = *result;
+        super_t::storage()[0] = *result;
       }
 
       self.wait();
 
-      return storage_[0];
+      return super_t::storage()[0];
     }
 
 
@@ -507,17 +481,59 @@ class collective_reducer
       // XXX we're using inside knowledge that reduce_and_elect() always elects agent_rank == 0
       if(self.rank() == 0)
       {
-        storage_[0] = *result;
+        super_t::storage()[0] = *result;
       }
 
       self.wait();
 
-      return storage_[0];
+      return super_t::storage()[0];
     }
 
+
   private:
-    using storage_type = agency::experimental::array<T, maximum(num_agents, 2 * minimum(num_agents, 32))>;
-    storage_type storage_;
+    // initialize_storage() without init value
+    template<class ConcurrentAgent, class ContiguousRange>
+    __device__
+    static void initialize_storage(ConcurrentAgent& self, ContiguousRange& storage, const agency::experimental::optional<T>& value, int count)
+    {
+      auto agent_rank = self.rank();
+
+      // store partial sum to storage
+      if(agent_rank < count)
+      {
+        storage[agent_rank] = *value;
+      }
+
+      self.wait();
+    }
+
+
+    // initialize_storage() with init value
+    template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation>
+    __device__
+    static void initialize_storage(ConcurrentAgent& self, ContiguousRange& storage, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
+    {
+      auto agent_rank = self.rank();
+
+      if(agent_rank == 0)
+      {
+        // agent 0 sums in the init
+        if(count == 0)
+        {
+          storage[agent_rank] = init;
+        }
+        else
+        {
+          storage[agent_rank] = binary_op(init, *value);
+        }
+      }
+      else if(agent_rank < count)
+      {
+        storage[agent_rank] = *value;
+      }
+
+      self.wait();
+    }
 };
 
 
