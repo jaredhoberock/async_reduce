@@ -209,6 +209,9 @@ agency::experimental::optional<agency::experimental::range_value_t<Range>>
   uninitialized_reduce(ExecutionPolicy policy, Range&& rng, BinaryOperator binary_op);
 
 
+constexpr int dynamic_group_size = -1;
+
+
 namespace detail
 {
 
@@ -229,9 +232,6 @@ using execution_agent_static_group_size = typename detail::execution_agent_stati
 
 template<class ExecutionAgent>
 using execution_agent_has_static_group_size = agency::detail::is_detected<execution_agent_static_group_size, ExecutionAgent>;
-
-
-constexpr int dynamic_group_size = -1;
 
 
 template<class T, int group_size>
@@ -364,9 +364,6 @@ class basic_collective_reducer<T,dynamic_group_size>
     {
       using namespace agency::experimental;
 
-      // XXX this should be generalized somehow -- it's just the smaller of 32 and self.group_size()
-      //     in other words, at most the first warp of agents participates
-      // XXX alternatively, maybe this implementation should only be available to groups of static size
       const int num_participating_agents = minimum(32, (int)self.group_size());
       const int num_sequential_sums_per_agent = self.group_size() / num_participating_agents;
 
