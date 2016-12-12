@@ -241,7 +241,7 @@ class collective_reducer
     // initialize_storage() without init value
     template<class ConcurrentAgent, class ContiguousRange>
     __device__
-    static void initialize_storage(ConcurrentAgent& self, ContiguousRange&& storage, const agency::experimental::optional<T>& value, int count)
+    static void initialize_storage(ConcurrentAgent& self, ContiguousRange& storage, const agency::experimental::optional<T>& value, int count)
     {
       auto agent_rank = self.rank();
 
@@ -257,7 +257,7 @@ class collective_reducer
     // initialize_storage() with init value
     template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation>
     __device__
-    static void initialize_storage(ConcurrentAgent& self, ContiguousRange&& storage, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
+    static void initialize_storage(ConcurrentAgent& self, ContiguousRange& storage, const agency::experimental::optional<T>& value, int count, T init, BinaryOperation binary_op)
     {
       auto agent_rank = self.rank();
 
@@ -286,9 +286,15 @@ class collective_reducer
     // it assumes that initialize_storage() has been called to intialize the storage range with the values to reduce
     template<class ConcurrentAgent, class ContiguousRange, class BinaryOperation>
     __device__
-    static agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, ContiguousRange&& storage, int count, BinaryOperation binary_op)
+    static agency::experimental::optional<T> do_reduce_and_elect(ConcurrentAgent& self, ContiguousRange& storage, int count, BinaryOperation binary_op)
     {
       using namespace agency::experimental;
+
+      // XXX this should be generalized somehow -- it's just the smaller of 32 and self.group_size()
+      //     in other words, at most the first warp of agents participates
+      // XXX alternatively, maybe this implementation should only be available to groups of static size
+      static constexpr const int num_participating_agents = minimum(32, num_agents);
+      static constexpr const int num_sequential_sums_per_agent = num_agents / num_participating_agents;
 
       agency::experimental::optional<T> partial_sum;
       auto partial_sums = span<T>(storage.data(), count);
@@ -300,19 +306,19 @@ class collective_reducer
       if(agent_rank < num_participating_agents)
       {
         // stride through the input and compute a partial sum per agent
-        auto my_partial_sums = stride(drop(partial_sums, agent_rank), (int)num_participating_agents);
+        auto my_partial_sums = stride(drop(partial_sums, agent_rank), num_participating_agents);
 
         partial_sum = uninitialized_reduce(bound<num_sequential_sums_per_agent>(), my_partial_sums, binary_op);
 
         // reduce across the warp
-        partial_sum = warp_barrier::reduce_and_elect(agent_rank, partial_sum, minimum(count, (int)num_participating_agents), binary_op);
+        partial_sum = warp_barrier::reduce_and_elect(agent_rank, partial_sum, minimum(count, num_participating_agents), binary_op);
       }
       self.wait();
 #else
       if(agent_rank < num_participating_agents)
       {
         // stride through the input and compute a partial sum per agent
-        auto my_partial_sums = stride(drop(partial_sums, agent_rank), (int)num_participating_agents);
+        auto my_partial_sums = stride(drop(partial_sums, agent_rank), num_participating_agents);
 
         partial_sum = uninitialized_reduce(bound<num_sequential_sums_per_agent>(), my_partial_sums, binary_op);
 
@@ -323,8 +329,11 @@ class collective_reducer
       }
       self.wait();
 
-      int count2 = minimum(count, int(num_participating_agents));
+      int num_partial_sums = minimum(count, num_participating_agents);
+
+      static constexpr const int num_passes = log2(num_participating_agents);
       int first = (1 & num_passes) ? num_participating_agents : 0;
+
       if(agent_rank < num_participating_agents && partial_sum)
       {
         storage[first + agent_rank] = *partial_sum;
@@ -337,7 +346,7 @@ class collective_reducer
       {
         if(agent_rank < num_participating_agents)
         {
-          if(agent_rank + offset < count2) 
+          if(agent_rank + offset < num_partial_sums) 
           {
             partial_sum = binary_op(*partial_sum, storage[first + offset + agent_rank]);
           }
@@ -412,15 +421,7 @@ class collective_reducer
     }
 
   private:
-    // XXX these should just be constexpr members, but nvcc crashes when i do that
-    enum
-    { 
-      num_participating_agents = minimum(num_agents, (int)32), 
-      num_passes = log2(num_participating_agents),
-      num_sequential_sums_per_agent = num_agents / num_participating_agents 
-    };
-
-    using storage_type = agency::experimental::array<T, maximum(num_agents, 2 * num_participating_agents)>;
+    using storage_type = agency::experimental::array<T, maximum(num_agents, 2 * minimum(num_agents, 32))>;
     storage_type storage_;
 };
 
