@@ -3,113 +3,20 @@
 #include <utility>
 #include <agency/agency.hpp>
 #include <agency/experimental.hpp>
-#include <agency/execution/executor/experimental/unrolling_executor.hpp>
+
+#include "reduce.hpp"
 #include "collective_reducer.hpp"
+#include "shared.hpp"
 
 
 namespace experimental
 {
 
 
-// XXX unrolling stuff should go in its own file
-template<size_t factor_>
-class unrolling_execution_policy : public agency::basic_execution_policy<
-  agency::sequenced_agent,
-  agency::experimental::unrolling_executor<factor_>,
-  unrolling_execution_policy<factor_>
->
-{
-  private:
-    using super_t = agency::basic_execution_policy<
-      agency::sequenced_agent,
-      agency::experimental::unrolling_executor<factor_>,
-      unrolling_execution_policy<factor_>
-    >;
-
-  public:
-    static constexpr size_t factor = factor_;
-
-    using super_t::basic_execution_policy;
-};
-
-template<size_t factor>
+template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, int reducer_size, class Range, class T, class BinaryOperator>
 __AGENCY_ANNOTATION
-unrolling_execution_policy<factor> unroll()
-{
-  return unrolling_execution_policy<factor>{};
-}
-
-
-template<class ExecutionPolicy, class Range, class Function>
-__host__ __device__
-void for_each(ExecutionPolicy policy, Range&& rng, Function f)
-{
-  auto exec = policy.executor();
-
-  exec.bulk_sync_execute([&](size_t i, int, int)
-  {
-    std::forward<Function>(f)(rng[i]);
-  },
-  rng.size(),
-  []{ return 0; },
-  []{ return 0; }
-  );
-}
-
-
-template<class Range, class Function>
-__host__ __device__
-void for_each(agency::sequenced_execution_policy, Range&& rng, Function f)
-{
-  for(auto i = rng.begin(); i != rng.end(); ++i)
-  {
-    std::forward<Function>(f)(*i);
-  }
-}
-
-
-template<class ExecutionPolicy, class Range, class T, class BinaryOperator>
-__host__ __device__
-T reduce(ExecutionPolicy policy, Range&& rng, T init, BinaryOperator binary_op)
-{
-  using reference = typename agency::experimental::range_value_t<Range>;
-
-  for_each(policy, std::forward<Range>(rng), [&](reference x)
-  {
-    init = binary_op(init, x);
-  });
-
-  return init;
-}
-
-
-template<class ExecutionPolicy, class Range, class BinaryOperator>
-__host__ __device__
-agency::experimental::range_value_t<Range>
-  reduce_nonempty(ExecutionPolicy policy, Range&& rng, BinaryOperator binary_op)
-{
-  return reduce(policy, agency::experimental::drop(std::forward<Range>(rng), 1), std::forward<Range>(rng)[0], binary_op);
-}
-
-
-template<class ExecutionPolicy, class Range, class BinaryOperator>
-__host__ __device__
-agency::experimental::optional<agency::experimental::range_value_t<Range>>
-  uninitialized_reduce(ExecutionPolicy policy, Range&& rng, BinaryOperator binary_op)
-{
-  if(!std::forward<Range>(rng).empty())
-  {
-    return reduce_nonempty(policy, std::forward<Range>(rng), binary_op);
-  }
-
-  return agency::experimental::nullopt;
-}
-
-
-template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, class Range, class T, class BinaryOperator>
-__host__ __device__
 T cooperative_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
-                     collective_reducer<agency::experimental::range_value_t<Range>, (int)group_size>& reducer,
+                     collective_reducer<agency::experimental::range_value_t<Range>, reducer_size>& reducer,
                      Range&& rng,
                      T init,
                      BinaryOperator binary_op)
@@ -131,6 +38,32 @@ T cooperative_reduce(agency::experimental::static_concurrent_agent<group_size, g
 }
 
 
+template<class ConcurrentAgent, int reducer_size, class Range, class T, class BinaryOperator>
+__AGENCY_ANNOTATION
+T cooperative_reduce(ConcurrentAgent& self,
+                     collective_reducer<agency::experimental::range_value_t<Range>, reducer_size>& reducer,
+                     Range&& rng,
+                     T init,
+                     BinaryOperator binary_op)
+{
+  using namespace agency::experimental;
+
+  auto agent_rank = self.rank();
+  auto group_size = self.group_size();
+
+  // each agent strides through its group's chunk of the input...
+  auto my_values = stride(drop(rng, agent_rank), group_size);
+  
+  // ...and sequentially computes a partial sum
+  auto partial_sum = uninitialized_reduce(agency::seq, my_values, binary_op);
+  
+  // the entire group cooperatively reduces the partial sums
+  int num_partials = rng.size() < group_size ? rng.size() : group_size;
+
+  return reducer.reduce(self, partial_sum, num_partials, init, binary_op);
+}
+
+
 // special case for when the heap_size is smaller than the size of the collective_reducer type we need to allocate
 template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, class Range, class T, class BinaryOperator,
          __AGENCY_REQUIRES(
@@ -138,7 +71,7 @@ template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, 
              collective_reducer<agency::experimental::range_value_t<Range>, group_size>
            )
          )>
-__host__ __device__
+__AGENCY_ANNOTATION
 T cooperative_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
                      Range&& rng, T init, BinaryOperator binary_op)
 {
@@ -157,10 +90,51 @@ T cooperative_reduce(agency::experimental::static_concurrent_agent<group_size, g
 }
 
 
+// this is the overload of cooperative_reduce() for static_concurrent_agent with large heap_size
+template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, class Range, class T, class BinaryOperator,
+         __AGENCY_REQUIRES(
+           heap_size >= sizeof(
+             collective_reducer<agency::experimental::range_value_t<Range>, group_size>
+           )
+         )>
+__AGENCY_ANNOTATION
+T cooperative_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
+                     Range&& rng, T init, BinaryOperator binary_op)
+{
+  using agent_type = agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>;
+  using value_type = agency::experimental::range_value_t<Range>;
+
+  // note that the collective_reducer has a static size
+  using reducer_type = collective_reducer<value_type, group_size>;
+
+  // create a shared reducer
+  ::experimental::shared<reducer_type, agent_type> reducer(self);
+
+  return cooperative_reduce(self, reducer.value(), std::forward<Range>(rng), init, binary_op);
+}
+
+
+// this is the overload of cooperative_reduce() for generic ConcurrentAgent
+template<class ConcurrentAgent, class Range, class T, class BinaryOperator>
+__AGENCY_ANNOTATION
+T cooperative_reduce(ConcurrentAgent& self, Range&& rng, T init, BinaryOperator binary_op)
+{
+  using value_type = agency::experimental::range_value_t<Range>;
+
+  // note that the collective_reducer has a dynamic size
+  using reducer_type = collective_reducer<value_type>;
+
+  // create a shared reducer
+  ::experimental::shared<reducer_type, ConcurrentAgent> reducer(self, self.group_size(), self.memory_resource());
+
+  return cooperative_reduce(self, reducer.value(), std::forward<Range>(rng), init, binary_op);
+}
+
+
 // XXX this should return optional
 // XXX we should attempt to implement this with cooperative_reduce()
 template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, class Range, class BinaryOperator>
-__host__ __device__
+__AGENCY_ANNOTATION
 agency::experimental::range_value_t<Range>
   cooperative_uninitialized_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
                                    collective_reducer<agency::experimental::range_value_t<Range>, (int)group_size>& reducer,
@@ -193,7 +167,7 @@ template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, 
              collective_reducer<agency::experimental::range_value_t<Range>, group_size>
            )
          )>
-__host__ __device__
+__AGENCY_ANNOTATION
 agency::experimental::range_value_t<Range>
   cooperative_uninitialized_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
                                    Range&& rng,
