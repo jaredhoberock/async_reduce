@@ -131,11 +131,10 @@ T cooperative_reduce(ConcurrentAgent& self, Range&& rng, T init, BinaryOperator 
 }
 
 
-// XXX this should return optional
 // XXX we should attempt to implement this with cooperative_reduce()
 template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, class Range, class BinaryOperator>
 __AGENCY_ANNOTATION
-agency::experimental::range_value_t<Range>
+agency::experimental::optional<agency::experimental::range_value_t<Range>>
   cooperative_uninitialized_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
                                    collective_reducer<agency::experimental::range_value_t<Range>, (int)group_size>& reducer,
                                    Range&& rng,
@@ -159,7 +158,6 @@ agency::experimental::range_value_t<Range>
 
 
 // special case for when the heap_size is smaller than the size of the collective_reducer type we need to allocate
-// XXX this should return optional
 // XXX we should attempt to implement this with cooperative_reduce()
 template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, class Range, class BinaryOperator,
          __AGENCY_REQUIRES(
@@ -168,7 +166,7 @@ template<std::size_t group_size, std::size_t grain_size, std::size_t heap_size, 
            )
          )>
 __AGENCY_ANNOTATION
-agency::experimental::range_value_t<Range>
+agency::experimental::optional<agency::experimental::range_value_t<Range>>
   cooperative_uninitialized_reduce(agency::experimental::static_concurrent_agent<group_size, grain_size, heap_size>& self,
                                    Range&& rng,
                                    BinaryOperator binary_op)

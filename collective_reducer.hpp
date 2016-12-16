@@ -540,10 +540,14 @@ class collective_reducer : public detail::basic_collective_reducer<T,group_size>
     // reduce() without init
     template<class ConcurrentAgent, class BinaryOperation>
     __AGENCY_ANNOTATION
-    T reduce(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
+    agency::experimental::optional<T> reduce(ConcurrentAgent& self, const agency::experimental::optional<T>& value, int count, BinaryOperation binary_op)
     {
+      // check for empty input early
+      if(count == 0) return agency::experimental::nullopt;
+
       auto result = reduce_and_elect(self, value, count, binary_op);
 
+      // the agent with the result puts it in shared storage
       // XXX we're using inside knowledge that reduce_and_elect() always elects agent_rank == 0
       if(self.rank() == 0)
       {
@@ -552,7 +556,7 @@ class collective_reducer : public detail::basic_collective_reducer<T,group_size>
 
       self.wait();
 
-      return super_t::storage()[0];
+      return agency::experimental::make_optional(super_t::storage()[0]);
     }
 
 

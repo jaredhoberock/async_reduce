@@ -48,10 +48,10 @@ agency::cuda::async_future<T> async_reduce(Range&& input, T init, BinaryOperatio
       auto this_tile = tile(input_view, tile_size)[self.outer().rank()];
 
       // sum across the tile
-      auto tile_sum = cooperative_uninitialized_reduce(self.inner(), this_tile, binary_op);
+      optional<T> tile_sum = cooperative_uninitialized_reduce(self.inner(), this_tile, binary_op);
 
       // rank 0 returns the result
-      return self.inner().rank() == 0 ? scope_result<1,T>(tile_sum) : no_result<T>();
+      return self.inner().rank() == 0 ? scope_result<1,T>(*tile_sum) : no_result<T>();
     }
   );
 
@@ -61,10 +61,10 @@ agency::cuda::async_future<T> async_reduce(Range&& input, T init, BinaryOperatio
     [=] __host__ __device__ (static_grid_agent<512,4>& self, tile_sums_t& tile_sums)
     {
       // sum across the tile
-      auto tile_sum = cooperative_reduce(self.inner(), tile_sums, init, binary_op);
+      T result = cooperative_reduce(self.inner(), tile_sums, init, binary_op);
 
       // rank 0 returns the result
-      return self.inner().rank() == 0 ? single_result<T>(tile_sum) : no_result<T>();
+      return self.inner().rank() == 0 ? single_result<T>(result) : no_result<T>();
     },
     tile_sums_future
   );
