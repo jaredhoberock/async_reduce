@@ -6,7 +6,6 @@
 
 #include "reduce.hpp"
 #include "collective_reducer.hpp"
-#include "shared.hpp"
 
 
 namespace experimental
@@ -108,7 +107,7 @@ T cooperative_reduce(agency::experimental::static_concurrent_agent<group_size, g
   using reducer_type = collective_reducer<value_type, group_size>;
 
   // create a shared reducer
-  ::experimental::shared<reducer_type, agent_type> reducer(self);
+  agency::shared<reducer_type, agent_type> reducer(self);
 
   return cooperative_reduce(self, reducer.value(), std::forward<Range>(rng), init, binary_op);
 }
@@ -125,7 +124,7 @@ T cooperative_reduce(ConcurrentAgent& self, Range&& rng, T init, BinaryOperator 
   using reducer_type = collective_reducer<value_type>;
 
   // create a shared reducer
-  ::experimental::shared<reducer_type, ConcurrentAgent> reducer(self, self.group_size(), self.memory_resource());
+  agency::shared<reducer_type, ConcurrentAgent> reducer(self, self.group_size(), self.memory_resource());
 
   return cooperative_reduce(self, reducer.value(), std::forward<Range>(rng), init, binary_op);
 }
